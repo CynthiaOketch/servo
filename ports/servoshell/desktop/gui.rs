@@ -3,10 +3,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::collections::HashMap;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use std::fs;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -14,16 +10,12 @@ use dpi::PhysicalSize;
 use egui::text::{CCursor, CCursorRange};
 use egui::text_edit::TextEditState;
 use egui::{
-    Button, FontDefinitions, Id, Key, Label, LayerId, Modifiers, Order, PaintCallback, Panel, Vec2,
-    WidgetInfo, WidgetType, pos2,
+    Button, Id, Key, Label, LayerId, Modifiers, Order, PaintCallback, Panel, Vec2, WidgetInfo,
+    WidgetType, pos2,
 };
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use egui::{FontData, FontFamily};
 use egui_glow::{CallbackFn, EguiGlow};
 use egui_winit::EventResponse;
 use euclid::{Length, Point2D, Rect, Scale, Size2D};
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use log::info;
 use log::warn;
 use servo::{
     DeviceIndependentPixel, DevicePixel, Image, LoadStatus, OffscreenRenderingContext, PixelFormat,
@@ -82,74 +74,6 @@ fn truncate_with_ellipsis(input: &str, max_length: usize) -> String {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-fn load_cjk_fonts(font_candidates: &[(&str, &str)]) -> FontDefinitions {
-    let mut fonts = FontDefinitions::default();
-    let mut loaded_font_names = Vec::new();
-
-    for (path_str, font_name) in font_candidates.iter() {
-        let font_path = Path::new(path_str);
-        if font_path.exists() {
-            match fs::read(font_path) {
-                Ok(bytes) => {
-                    if !fonts.font_data.contains_key(*font_name) {
-                        fonts
-                            .font_data
-                            .insert(font_name.to_string(), Arc::new(FontData::from_owned(bytes)));
-                        loaded_font_names.push(font_name.to_string());
-                        info!("Loaded font: {}", font_name);
-                    }
-                },
-                Err(error) => {
-                    info!("Failed to read font {}: {}", font_name, error);
-                },
-            }
-        }
-    }
-
-    if !loaded_font_names.is_empty() {
-        let proportional = fonts.families.get_mut(&FontFamily::Proportional).unwrap();
-        for font_name in loaded_font_names.iter() {
-            proportional.insert(0, font_name.clone());
-        }
-    }
-
-    fonts
-}
-
-#[cfg(target_os = "windows")]
-fn configure_fonts() -> FontDefinitions {
-    load_cjk_fonts(&[
-        (r"C:\Windows\Fonts\malgun.ttf", "Malgun Gothic"), // Korean
-        (r"C:\Windows\Fonts\msyh.ttc", "Microsoft YaHei"), // Chinese + Japanese
-    ])
-}
-
-#[cfg(target_os = "linux")]
-fn configure_fonts() -> FontDefinitions {
-    load_cjk_fonts(&[
-        (
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "Noto Sans CJK",
-        ), // Ubuntu/Debian
-        (
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-            "Noto Sans CJK",
-        ), // Fedora/Arch
-        (
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "WenQuanYi Micro Hei",
-        ), // common fallback
-    ])
-}
-
-#[cfg(target_os = "macos")]
-fn configure_fonts() -> FontDefinitions {
-    // TODO: Default proportional fonts: ["Ubuntu-Light", "NotoEmoji-Regular", "emoji-icon-font"]
-    // does not support CJK. Add them for Mac.
-    FontDefinitions::default()
-}
-
 impl Drop for Gui {
     fn drop(&mut self) {
         self.rendering_context
@@ -178,8 +102,7 @@ impl Gui {
             false,
         );
 
-        let font_definitions = configure_fonts();
-        context.egui_ctx.set_fonts(font_definitions);
+        load_cjk_font(&context.egui_ctx);
 
         context
             .egui_winit
@@ -782,4 +705,79 @@ fn load_pending_favicons(
         // the texture to be freed.
         texture_cache.insert(id, (handle, texture));
     }
+}
+
+/// Load a CJK system font into the egui context so that CJK characters render
+/// correctly in the UI chrome (e.g. tab titles) regardless of system locale.
+///
+/// Uses font-kit for system font discovery so no font paths are hardcoded.
+/// Falls back gracefully if no CJK font is found.
+fn load_cjk_font(ctx: &egui::Context) {
+    use std::fs::File;
+    use std::io::Read;
+
+    use egui::{FontData, FontDefinitions, FontFamily};
+    use font_kit::family_name::FamilyName;
+    use font_kit::handle::Handle;
+    use font_kit::properties::Properties;
+    use font_kit::source::SystemSource;
+
+    let source = SystemSource::new();
+
+    // Ordered list of CJK font families to try. These cover Han, Hiragana/Katakana,
+    // and Hangul scripts across Linux, macOS, and Windows. font-kit resolves the
+    // actual file path at runtime — no paths are hardcoded here.
+    let candidates = [
+        "Noto Sans CJK SC",
+        "Noto Sans CJK TC",
+        "Noto Sans CJK JP",
+        "Noto Sans CJK KR",
+        "Noto Sans CJK",
+        "Source Han Sans SC",
+        "WenQuanYi Micro Hei",
+        "Droid Sans Fallback",
+        "Microsoft YaHei",
+        "PingFang SC",
+        "Hiragino Sans",
+        "Malgun Gothic",
+    ];
+
+    for name in candidates {
+        let Ok(handle) =
+            source.select_best_match(&[FamilyName::Title(name.to_string())], &Properties::new())
+        else {
+            continue;
+        };
+
+        let mut buf = Vec::new();
+        let ok = match handle {
+            Handle::Path { ref path, .. } => File::open(path)
+                .ok()
+                .and_then(|mut f| f.read_to_end(&mut buf).ok())
+                .is_some(),
+            Handle::Memory { ref bytes, .. } => {
+                buf = bytes.to_vec();
+                true
+            },
+        };
+        if !ok || buf.is_empty() {
+            continue;
+        }
+
+        let mut fonts = FontDefinitions::default();
+        fonts.font_data.insert(
+            "servoshell_cjk".to_string(),
+            Arc::new(FontData::from_owned(buf)),
+        );
+        if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
+            family.insert(0, "servoshell_cjk".to_string());
+        }
+        if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
+            family.push("servoshell_cjk".to_string());
+        }
+        ctx.set_fonts(fonts);
+        return;
+    }
+
+    warn!("No CJK font found on this system; CJK characters may render as boxes in the UI chrome.");
 }
