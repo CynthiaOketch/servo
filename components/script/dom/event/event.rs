@@ -704,11 +704,30 @@ impl Event {
                     let vtable = vtable_for(node);
                     vtable.handle_event(cx, self);
                 }
-            } else if let Some(target) = self.GetTarget() &&
-                let Some(node) = target.downcast::<Node>()
-            {
-                let vtable = vtable_for(node);
-                vtable.handle_event(cx, self);
+            } else {
+                // Every node tree the event crossed sees its own shadow-adjusted target, so
+                // run the default action of each of them, innermost first. Otherwise a form
+                // control inside a shadow tree, such as the range inputs of the media
+                // controls, would never see the pointer events targeting it, as the event's
+                // target ends up retargeted to the outermost shadow host.
+                let mut targets: SmallVec<[DomRoot<EventTarget>; 4]> = SmallVec::new();
+                for segment in self.path.borrow().iter() {
+                    if let Some(target) = segment.shadow_adjusted_target.as_deref() &&
+                        targets.last().is_none_or(|last| **last != *target)
+                    {
+                        targets.push(DomRoot::from_ref(target));
+                    }
+                }
+                if targets.is_empty() {
+                    targets.extend(self.GetTarget());
+                }
+
+                for target in targets {
+                    if let Some(node) = target.downcast::<Node>() {
+                        let vtable = vtable_for(node);
+                        vtable.handle_event(cx, self);
+                    }
+                }
             }
         }
 

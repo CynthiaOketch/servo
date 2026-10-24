@@ -467,8 +467,12 @@ impl IndependentFormattingContext {
                     },
                     style: &self.base.style,
                 };
+                // Damage inside the widget only invalidates the layout cache of the replaced
+                // element, as the widget's box isn't stored in any node's layout data. Reusing
+                // the widget's own cached layout would skip laying out the boxes rebuilt for
+                // that damage, leaving them without fragments, so always lay it out again.
                 if let Some(widget) = widget {
-                    let mut widget_layout = widget.borrow().layout(
+                    let mut widget_layout = widget.borrow().layout_without_caching(
                         layout_context,
                         positioning_context,
                         &widget_cb,
